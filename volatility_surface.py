@@ -25,6 +25,19 @@ st.sidebar.markdown (
     unsafe_allow_html=True
 )
 
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import timedelta
+from scipy.stats import norm
+from scipy.optimize import brentq
+from scipy.interpolate import griddata
+import plotly.graph_objects as go
+
+
+st.title('Implied Volatility Surface')
+
 def bs_call_price(S, K, T, r, sigma, q=0):
     d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
@@ -73,16 +86,6 @@ ticker_symbol = st.sidebar.text_input(
     max_chars=10
 ).upper()
 
-st.sidebar.header('Data Fetching Parameters')
-max_expirations = st.sidebar.number_input(
-    'Maximum Number of Expiration Dates to Load',
-    min_value=1,
-    max_value=20,
-    value=10,
-    step=1,
-    help='Limiting the number of expirations helps avoid rate limiting'
-)
-
 st.sidebar.header('Strike Price Filter Parameters')
 
 min_strike_pct = st.sidebar.number_input(
@@ -107,64 +110,26 @@ if min_strike_pct >= max_strike_pct:
     st.sidebar.error('Minimum percentage must be less than maximum percentage.')
     st.stop()
 
-def fetch_with_retry(func, max_retries=3, initial_delay=2):
-    """Retry a function with exponential backoff"""
-    last_exception = None
-    for attempt in range(max_retries):
-        try:
-            result = func()
-            return result
-        except Exception as e:
-            last_exception = e
-            error_msg = str(e)
-            if 'Rate limited' in error_msg or 'Too Many Requests' in error_msg:
-                if attempt < max_retries - 1:
-                    delay = initial_delay * (2 ** attempt)
-                    st.warning(f'Rate limited. Waiting {delay} seconds before retry {attempt + 1}/{max_retries}...')
-                    time.sleep(delay)
-                else:
-                    raise Exception(f'Rate limited after {max_retries} attempts. Please wait 5-10 minutes and try again.')
-            else:
-                raise
-    if last_exception:
-        raise last_exception
+ticker = yf.Ticker(ticker_symbol)
 
-@st.cache_data(ttl=3600)
-def fetch_option_data(ticker_symbol, risk_free_rate, dividend_yield, min_strike_pct, max_strike_pct, max_expirations):
-    ticker = yf.Ticker(ticker_symbol)
-    today = pd.Timestamp('today').normalize()
+today = pd.Timestamp('today').normalize()
 
-    try:
-        expirations = fetch_with_retry(lambda: ticker.options)
-    except Exception as e:
-        raise Exception(f'Error fetching options for {ticker_symbol}: {e}')
+try:
+    expirations = ticker.options
+except Exception as e:
+    st.error(f'Error fetching options for {ticker_symbol}: {e}')
+    st.stop()
 
-    exp_dates = [pd.Timestamp(exp) for exp in expirations if pd.Timestamp(exp) > today + timedelta(days=7)]
-    exp_dates = exp_dates[:max_expirations]
+exp_dates = [pd.Timestamp(exp) for exp in expirations if pd.Timestamp(exp) > today + timedelta(days=7)]
 
-    if not exp_dates:
-        raise Exception(f'No available option expiration dates for {ticker_symbol}.')
-
-    try:
-        spot_history = fetch_with_retry(lambda: ticker.history(period='5d'))
-        if spot_history.empty:
-            raise Exception(f'Failed to retrieve spot price data for {ticker_symbol}.')
-        spot_price = spot_history['Close'].iloc[-1]
-    except Exception as e:
-        raise Exception(f'An error occurred while fetching spot price data: {e}')
-
+if not exp_dates:
+    st.error(f'No available option expiration dates for {ticker_symbol}.')
+else:
     option_data = []
 
-    for i, exp_date in enumerate(exp_dates):
+    for exp_date in exp_dates:
         try:
-            if i > 0:
-                time.sleep(1)
-
-            opt_chain = fetch_with_retry(
-                lambda date=exp_date: ticker.option_chain(date.strftime('%Y-%m-%d')),
-                max_retries=2,
-                initial_delay=3
-            )
+            opt_chain = ticker.option_chain(exp_date.strftime('%Y-%m-%d'))
             calls = opt_chain.calls
         except Exception as e:
             st.warning(f'Failed to fetch option chain for {exp_date.date()}: {e}')
@@ -172,7 +137,7 @@ def fetch_option_data(ticker_symbol, risk_free_rate, dividend_yield, min_strike_
 
         calls = calls[(calls['bid'] > 0) & (calls['ask'] > 0)]
 
-        for _, row in calls.iterrows():
+        for index, row in calls.iterrows():
             strike = row['strike']
             bid = row['bid']
             ask = row['ask']
@@ -187,97 +152,86 @@ def fetch_option_data(ticker_symbol, risk_free_rate, dividend_yield, min_strike_
             })
 
     if not option_data:
-        raise Exception('No option data available after filtering.')
+        st.error('No option data available after filtering.')
+    else:
+        options_df = pd.DataFrame(option_data)
 
-    options_df = pd.DataFrame(option_data)
+        try:
+            spot_history = ticker.history(period='5d')
+            if spot_history.empty:
+                st.error(f'Failed to retrieve spot price data for {ticker_symbol}.')
+                st.stop()
+            else:
+                spot_price = spot_history['Close'].iloc[-1]
+        except Exception as e:
+            st.error(f'An error occurred while fetching spot price data: {e}')
+            st.stop()
 
-    options_df['daysToExpiration'] = (options_df['expirationDate'] - today).dt.days
-    options_df['timeToExpiration'] = options_df['daysToExpiration'] / 365
+        options_df['daysToExpiration'] = (options_df['expirationDate'] - today).dt.days
+        options_df['timeToExpiration'] = options_df['daysToExpiration'] / 365
 
-    options_df = options_df[
-        (options_df['strike'] >= spot_price * (min_strike_pct / 100)) &
-        (options_df['strike'] <= spot_price * (max_strike_pct / 100))
-    ]
+        options_df = options_df[
+            (options_df['strike'] >= spot_price * (min_strike_pct / 100)) &
+            (options_df['strike'] <= spot_price * (max_strike_pct / 100))
+        ]
 
-    options_df.reset_index(drop=True, inplace=True)
+        options_df.reset_index(drop=True, inplace=True)
 
-    options_df['impliedVolatility'] = options_df.apply(
-        lambda row: implied_volatility(
-            price=row['mid'],
-            S=spot_price,
-            K=row['strike'],
-            T=row['timeToExpiration'],
-            r=risk_free_rate,
-            q=dividend_yield
-        ), axis=1
-    )
+        with st.spinner('Calculating implied volatility...'):
+            options_df['impliedVolatility'] = options_df.apply(
+                lambda row: implied_volatility(
+                    price=row['mid'],
+                    S=spot_price,
+                    K=row['strike'],
+                    T=row['timeToExpiration'],
+                    r=risk_free_rate,
+                    q=dividend_yield
+                ), axis=1
+            )
 
-    options_df.dropna(subset=['impliedVolatility'], inplace=True)
+        options_df.dropna(subset=['impliedVolatility'], inplace=True)
 
-    options_df['impliedVolatility'] *= 100
+        options_df['impliedVolatility'] *= 100
 
-    options_df.sort_values('strike', inplace=True)
+        options_df.sort_values('strike', inplace=True)
 
-    options_df['moneyness'] = options_df['strike'] / spot_price
+        options_df['moneyness'] = options_df['strike'] / spot_price
 
-    return options_df, spot_price
+        if y_axis_option == 'Strike Price ($)':
+            Y = options_df['strike'].values
+            y_label = 'Strike Price ($)'
+        else:
+            Y = options_df['moneyness'].values
+            y_label = 'Moneyness (Strike / Spot)'
 
+        X = options_df['timeToExpiration'].values
+        Z = options_df['impliedVolatility'].values
 
-try:
-    with st.spinner('Fetching option data and calculating implied volatility...'):
-        options_df, spot_price = fetch_option_data(
-            ticker_symbol,
-            risk_free_rate,
-            dividend_yield,
-            min_strike_pct,
-            max_strike_pct,
-            max_expirations
+        ti = np.linspace(X.min(), X.max(), 50)
+        ki = np.linspace(Y.min(), Y.max(), 50)
+        T, K = np.meshgrid(ti, ki)
+
+        Zi = griddata((X, Y), Z, (T, K), method='linear')
+
+        Zi = np.ma.array(Zi, mask=np.isnan(Zi))
+
+        fig = go.Figure(data=[go.Surface(
+            x=T, y=K, z=Zi,
+            colorscale='Viridis',
+            colorbar_title='Implied Volatility (%)'
+        )])
+
+        fig.update_layout(
+            title=f'Implied Volatility Surface for {ticker_symbol} Options',
+            scene=dict(
+                xaxis_title='Time to Expiration (years)',
+                yaxis_title=y_label,
+                zaxis_title='Implied Volatility (%)'
+            ),
+            autosize=False,
+            width=900,
+            height=800,
+            margin=dict(l=65, r=50, b=65, t=90)
         )
 
-    st.success(f'✅ Successfully loaded {len(options_df)} options for {ticker_symbol} (Spot: ${spot_price:.2f})')
-
-    if y_axis_option == 'Strike Price ($)':
-        Y = options_df['strike'].values
-        y_label = 'Strike Price ($)'
-    else:
-        Y = options_df['moneyness'].values
-        y_label = 'Moneyness (Strike / Spot)'
-
-    X = options_df['timeToExpiration'].values
-    Z = options_df['impliedVolatility'].values
-
-    ti = np.linspace(X.min(), X.max(), 50)
-    ki = np.linspace(Y.min(), Y.max(), 50)
-    T, K = np.meshgrid(ti, ki)
-
-    Zi = griddata((X, Y), Z, (T, K), method='linear')
-
-    Zi = np.ma.array(Zi, mask=np.isnan(Zi))
-
-    fig = go.Figure(data=[go.Surface(
-        x=T, y=K, z=Zi,
-        colorscale='Viridis',
-        colorbar_title='Implied Volatility (%)'
-    )])
-
-    fig.update_layout(
-        title=f'Implied Volatility Surface for {ticker_symbol} Options',
-        scene=dict(
-            xaxis_title='Time to Expiration (years)',
-            yaxis_title=y_label,
-            zaxis_title='Implied Volatility (%)'
-        ),
-        autosize=False,
-        width=900,
-        height=800,
-        margin=dict(l=65, r=50, b=65, t=90)
-    )
-
-    st.plotly_chart(fig)
-
-except Exception as e:
-    st.error(f'❌ {str(e)}')
-    st.info('💡 If you are rate limited, try:')
-    st.write('- Waiting 5-10 minutes before retrying')
-    st.write('- Reducing the "Maximum Number of Expiration Dates to Load"')
-    st.write('- Using a different ticker symbol')
+        st.plotly_chart(fig)
