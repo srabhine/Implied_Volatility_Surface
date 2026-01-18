@@ -107,13 +107,35 @@ if min_strike_pct >= max_strike_pct:
     st.sidebar.error('Minimum percentage must be less than maximum percentage.')
     st.stop()
 
+def fetch_with_retry(func, max_retries=3, initial_delay=2):
+    """Retry a function with exponential backoff"""
+    last_exception = None
+    for attempt in range(max_retries):
+        try:
+            result = func()
+            return result
+        except Exception as e:
+            last_exception = e
+            error_msg = str(e)
+            if 'Rate limited' in error_msg or 'Too Many Requests' in error_msg:
+                if attempt < max_retries - 1:
+                    delay = initial_delay * (2 ** attempt)
+                    st.warning(f'Rate limited. Waiting {delay} seconds before retry {attempt + 1}/{max_retries}...')
+                    time.sleep(delay)
+                else:
+                    raise Exception(f'Rate limited after {max_retries} attempts. Please wait 5-10 minutes and try again.')
+            else:
+                raise
+    if last_exception:
+        raise last_exception
+
 @st.cache_data(ttl=3600)
 def fetch_option_data(ticker_symbol, risk_free_rate, dividend_yield, min_strike_pct, max_strike_pct, max_expirations):
     ticker = yf.Ticker(ticker_symbol)
     today = pd.Timestamp('today').normalize()
 
     try:
-        expirations = ticker.options
+        expirations = fetch_with_retry(lambda: ticker.options)
     except Exception as e:
         raise Exception(f'Error fetching options for {ticker_symbol}: {e}')
 
@@ -124,7 +146,7 @@ def fetch_option_data(ticker_symbol, risk_free_rate, dividend_yield, min_strike_
         raise Exception(f'No available option expiration dates for {ticker_symbol}.')
 
     try:
-        spot_history = ticker.history(period='5d')
+        spot_history = fetch_with_retry(lambda: ticker.history(period='5d'))
         if spot_history.empty:
             raise Exception(f'Failed to retrieve spot price data for {ticker_symbol}.')
         spot_price = spot_history['Close'].iloc[-1]
@@ -136,9 +158,13 @@ def fetch_option_data(ticker_symbol, risk_free_rate, dividend_yield, min_strike_
     for i, exp_date in enumerate(exp_dates):
         try:
             if i > 0:
-                time.sleep(0.5)
+                time.sleep(1)
 
-            opt_chain = ticker.option_chain(exp_date.strftime('%Y-%m-%d'))
+            opt_chain = fetch_with_retry(
+                lambda date=exp_date: ticker.option_chain(date.strftime('%Y-%m-%d')),
+                max_retries=2,
+                initial_delay=3
+            )
             calls = opt_chain.calls
         except Exception as e:
             st.warning(f'Failed to fetch option chain for {exp_date.date()}: {e}')
