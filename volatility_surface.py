@@ -7,7 +7,6 @@ from scipy.stats import norm
 from scipy.optimize import brentq
 from scipy.interpolate import griddata
 import plotly.graph_objects as go
-import time
 
 
 st.title('Implied Volatility Surface')
@@ -25,18 +24,6 @@ st.sidebar.markdown (
     unsafe_allow_html=True
 )
 
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import numpy as np
-from datetime import timedelta
-from scipy.stats import norm
-from scipy.optimize import brentq
-from scipy.interpolate import griddata
-import plotly.graph_objects as go
-
-
-st.title('Implied Volatility Surface')
 
 def bs_call_price(S, K, T, r, sigma, q=0):
     d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
