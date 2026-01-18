@@ -13,10 +13,10 @@ import time
 st.title('Implied Volatility Surface')
 
 # Add GitHub link in the sidebar
-st.sidebar.markdown(
+st.sidebar.markdown (
     """
     <div style="text-align: center; padding: 20px 0;">
-        <a href="https://github.com/VOTRE_USERNAME/VOTRE_REPO" target="_blank">
+        <a href="https://github.com/srabhine/Implied_Volatility_Surface.git" target="_blank">
             <img src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png" width="40" height="40">
         </a>
         <p style="font-size: 12px; margin-top: 5px;">View on GitHub</p>
